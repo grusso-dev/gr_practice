@@ -790,3 +790,442 @@ Explicación:
 3. Pon ambos en `general` y verifica que se vean.
 4. Cambia uno a `deportes` y confirma aislamiento de mensajes.
 5. Prueba token inválido y verifica rechazo con estado no autorizado.
+
+## 6) Envío desde servidor: a uno, a sala y a todos (ejemplo completo)
+
+Abajo tienes un ejemplo completo (servidor + cliente) para copiar/pegar, con tres tipos de envío iniciados por el servidor:
+
+- a **un cliente** (`private_message`),
+- a **una sala** (`room_announcement`),
+- a **todos** (`global_announcement`).
+
+### 6.1 `server.js` completo (copiar y pegar)
+
+```js
+// Importamos Express para servidor HTTP.
+const express = require('express');
+// Importamos http para compartir servidor con WebSocket.
+const http = require('http');
+// Importamos ws para conexiones WebSocket.
+const WebSocket = require('ws');
+// Importamos path para servir index.html.
+const path = require('path');
+// Importamos URL para leer query params del handshake.
+const { URL } = require('url');
+
+const app = express();
+const PORT = 3000;
+
+// Token demo para auth básica.
+const VALID_TOKENS = new Set(['token-demo-123', 'token-demo-abc']);
+
+// Estructuras de sesión.
+const rooms = new Map(); // room -> Set<ws>
+const clientsByUser = new Map(); // user -> Set<ws>
+
+// Servimos archivos estáticos de la carpeta actual.
+app.use(express.static(path.join(__dirname)));
+
+const server = http.createServer(app);
+const wss = new WebSocket.Server({ server });
+
+// Envía evento JSON a un socket si está abierto.
+function sendToOne(ws, event) {
+  if (ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify(event));
+  }
+}
+
+// Envía evento JSON a todos los sockets abiertos.
+function broadcastAll(event) {
+  const raw = JSON.stringify(event);
+  wss.clients.forEach((client) => {
+    if (client.readyState === WebSocket.OPEN) {
+      client.send(raw);
+    }
+  });
+}
+
+// Envía evento JSON a todos los sockets de una sala.
+function broadcastRoom(roomName, event) {
+  const roomClients = rooms.get(roomName);
+  if (!roomClients) {
+    return;
+  }
+
+  const raw = JSON.stringify(event);
+  roomClients.forEach((client) => {
+    if (client.readyState === WebSocket.OPEN) {
+      client.send(raw);
+    }
+  });
+}
+
+// Envía evento JSON a un usuario (si tiene múltiples tabs, llega a todas).
+function sendToUser(userName, event) {
+  const userClients = clientsByUser.get(userName);
+  if (!userClients) {
+    return;
+  }
+
+  const raw = JSON.stringify(event);
+  userClients.forEach((client) => {
+    if (client.readyState === WebSocket.OPEN) {
+      client.send(raw);
+    }
+  });
+}
+
+function addToRoom(ws, room) {
+  if (!rooms.has(room)) {
+    rooms.set(room, new Set());
+  }
+  rooms.get(room).add(ws);
+  ws.roomName = room;
+}
+
+function removeFromRoom(ws) {
+  if (!ws.roomName) {
+    return;
+  }
+  const set = rooms.get(ws.roomName);
+  if (!set) {
+    ws.roomName = null;
+    return;
+  }
+  set.delete(ws);
+  if (set.size === 0) {
+    rooms.delete(ws.roomName);
+  }
+  ws.roomName = null;
+}
+
+function addToUserIndex(ws, user) {
+  if (!clientsByUser.has(user)) {
+    clientsByUser.set(user, new Set());
+  }
+  clientsByUser.get(user).add(ws);
+  ws.userName = user;
+}
+
+function removeFromUserIndex(ws) {
+  if (!ws.userName) {
+    return;
+  }
+  const set = clientsByUser.get(ws.userName);
+  if (!set) {
+    ws.userName = null;
+    return;
+  }
+  set.delete(ws);
+  if (set.size === 0) {
+    clientsByUser.delete(ws.userName);
+  }
+  ws.userName = null;
+}
+
+wss.on('connection', (ws, req) => {
+  const requestUrl = new URL(req.url, `http://${req.headers.host}`);
+  const token = requestUrl.searchParams.get('token');
+  const user = String(requestUrl.searchParams.get('user') || 'anonimo').trim() || 'anonimo';
+  const room = String(requestUrl.searchParams.get('room') || 'general').trim() || 'general';
+
+  // Validación básica de token.
+  if (!token || !VALID_TOKENS.has(token)) {
+    sendToOne(ws, {
+      type: 'error',
+      payload: { message: 'No autorizado: token inválido o ausente' },
+    });
+    ws.close(1008, 'Unauthorized');
+    return;
+  }
+
+  addToUserIndex(ws, user);
+  addToRoom(ws, room);
+
+  sendToOne(ws, {
+    type: 'system_message',
+    payload: { text: `Conectado como ${user} en sala ${room}` },
+  });
+
+  // Ejemplo 1: servidor envía a UN cliente (solo al recién conectado).
+  sendToOne(ws, {
+    type: 'private_message',
+    payload: { from: 'server', text: `Hola ${user}, este mensaje es solo para ti.` },
+  });
+
+  // Ejemplo 2: servidor avisa a la SALA del ingreso.
+  broadcastRoom(room, {
+    type: 'room_announcement',
+    payload: { room, text: `${user} se unió a la sala.` },
+  });
+
+  // Ejemplo 3: servidor avisa GLOBALMENTE el total de conexiones.
+  broadcastAll({
+    type: 'global_announcement',
+    payload: { text: `Conexiones activas: ${wss.clients.size}` },
+  });
+
+  ws.on('message', (rawMessage) => {
+    let incoming;
+    try {
+      incoming = JSON.parse(rawMessage.toString());
+    } catch {
+      sendToOne(ws, {
+        type: 'error',
+        payload: { message: 'Formato inválido: se esperaba JSON' },
+      });
+      return;
+    }
+
+    // Chat normal a la sala actual.
+    if (incoming.type === 'chat_message') {
+      const text = String(incoming.payload?.text || '').trim();
+      if (!text) {
+        return;
+      }
+
+      broadcastRoom(ws.roomName, {
+        type: 'chat_message',
+        payload: {
+          room: ws.roomName,
+          user: ws.userName,
+          text,
+          sentAt: new Date().toISOString(),
+        },
+      });
+      return;
+    }
+
+    // Evento demo: servidor manda mensaje privado a usuario destino.
+    if (incoming.type === 'send_private') {
+      const targetUser = String(incoming.payload?.to || '').trim();
+      const text = String(incoming.payload?.text || '').trim();
+      if (!targetUser || !text) {
+        return;
+      }
+
+      sendToUser(targetUser, {
+        type: 'private_message',
+        payload: {
+          from: ws.userName,
+          text,
+        },
+      });
+      return;
+    }
+  });
+
+  ws.on('close', () => {
+    const roomName = ws.roomName;
+    const userName = ws.userName;
+
+    removeFromRoom(ws);
+    removeFromUserIndex(ws);
+
+    if (roomName && userName) {
+      broadcastRoom(roomName, {
+        type: 'room_announcement',
+        payload: { room: roomName, text: `${userName} salió de la sala.` },
+      });
+    }
+
+    broadcastAll({
+      type: 'global_announcement',
+      payload: { text: `Conexiones activas: ${wss.clients.size}` },
+    });
+  });
+});
+
+server.listen(PORT, () => {
+  console.log(`HTTP: http://localhost:${PORT}`);
+  console.log(`WS: ws://localhost:${PORT}`);
+});
+```
+
+### 6.2 `index.html` completo (copiar y pegar)
+
+```html
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Demo envíos servidor</title>
+    <style>
+      body { font-family: sans-serif; max-width: 860px; margin: 2rem auto; padding: 0 1rem; }
+      #log { border: 1px solid #ccc; border-radius: 8px; min-height: 220px; padding: 1rem; white-space: pre-wrap; margin-top: 1rem; }
+      .row { display: flex; gap: .5rem; margin-top: .5rem; }
+      input { flex: 1; padding: .5rem; }
+      button { padding: .5rem 1rem; }
+    </style>
+  </head>
+  <body>
+    <h1>Demo: a uno / sala / todos</h1>
+
+    <div class="row">
+      <input id="userInput" value="browser" placeholder="Usuario" />
+      <input id="tokenInput" value="token-demo-123" placeholder="Token" />
+      <input id="roomInput" value="general" placeholder="Sala" />
+      <button id="connectBtn">Conectar</button>
+    </div>
+
+    <div class="row">
+      <input id="chatInput" placeholder="Mensaje a la sala" />
+      <button id="chatBtn">Enviar sala</button>
+    </div>
+
+    <div class="row">
+      <input id="toUserInput" placeholder="Usuario destino" />
+      <input id="privateInput" placeholder="Mensaje privado" />
+      <button id="privateBtn">Enviar privado</button>
+    </div>
+
+    <div id="log"></div>
+
+    <script>
+      const log = document.getElementById('log');
+      const userInput = document.getElementById('userInput');
+      const tokenInput = document.getElementById('tokenInput');
+      const roomInput = document.getElementById('roomInput');
+      const connectBtn = document.getElementById('connectBtn');
+      const chatInput = document.getElementById('chatInput');
+      const chatBtn = document.getElementById('chatBtn');
+      const toUserInput = document.getElementById('toUserInput');
+      const privateInput = document.getElementById('privateInput');
+      const privateBtn = document.getElementById('privateBtn');
+
+      let socket = null;
+
+      function appendLog(text) {
+        log.textContent += `${text}\n`;
+      }
+
+      function connect() {
+        const user = encodeURIComponent(userInput.value.trim() || 'anonimo');
+        const token = encodeURIComponent(tokenInput.value.trim());
+        const room = encodeURIComponent(roomInput.value.trim() || 'general');
+        const url = `ws://localhost:3000?token=${token}&user=${user}&room=${room}`;
+
+        socket = new WebSocket(url);
+
+        socket.addEventListener('open', () => appendLog('Conectado'));
+        socket.addEventListener('close', (e) => appendLog(`Cerrado (${e.code})`));
+        socket.addEventListener('error', () => appendLog('Error de conexión'));
+
+        socket.addEventListener('message', (event) => {
+          let data;
+          try {
+            data = JSON.parse(event.data);
+          } catch {
+            appendLog(`RAW: ${event.data}`);
+            return;
+          }
+
+          if (data.type === 'chat_message') {
+            appendLog(`[${data.payload.room}] ${data.payload.user}: ${data.payload.text}`);
+            return;
+          }
+
+          if (data.type === 'private_message') {
+            appendLog(`[PRIVADO] ${data.payload.from}: ${data.payload.text}`);
+            return;
+          }
+
+          if (data.type === 'room_announcement') {
+            appendLog(`[SALA ${data.payload.room}] ${data.payload.text}`);
+            return;
+          }
+
+          if (data.type === 'global_announcement') {
+            appendLog(`[GLOBAL] ${data.payload.text}`);
+            return;
+          }
+
+          if (data.type === 'system_message') {
+            appendLog(`[SISTEMA] ${data.payload.text}`);
+            return;
+          }
+
+          if (data.type === 'error') {
+            appendLog(`[ERROR] ${data.payload.message}`);
+            return;
+          }
+
+          appendLog(`[OTRO ${data.type}]`);
+        });
+      }
+
+      function sendChat() {
+        if (!socket || socket.readyState !== WebSocket.OPEN) return;
+        const text = chatInput.value.trim();
+        if (!text) return;
+
+        socket.send(JSON.stringify({
+          type: 'chat_message',
+          payload: { text },
+        }));
+        chatInput.value = '';
+      }
+
+      function sendPrivate() {
+        if (!socket || socket.readyState !== WebSocket.OPEN) return;
+        const to = toUserInput.value.trim();
+        const text = privateInput.value.trim();
+        if (!to || !text) return;
+
+        socket.send(JSON.stringify({
+          type: 'send_private',
+          payload: { to, text },
+        }));
+        privateInput.value = '';
+      }
+
+      connectBtn.addEventListener('click', connect);
+      chatBtn.addEventListener('click', sendChat);
+      privateBtn.addEventListener('click', sendPrivate);
+    </script>
+  </body>
+</html>
+```
+
+### 6.3 Qué demuestra este ejemplo
+
+- `sendToOne(ws, event)`: mensaje solo a un cliente.
+- `broadcastRoom(room, event)`: mensaje a una sala.
+- `broadcastAll(event)`: mensaje global a todos.
+- `sendToUser(userName, event)`: mensaje privado por identidad de usuario.
+
+### 6.4 Prueba guiada (3 navegadores)
+
+1. Levanta el servidor:
+
+```bash
+node server.js
+```
+
+2. Abre 3 navegadores/pestañas:
+
+- Navegador A: `user=ana`, `room=general`, `token=token-demo-123`
+- Navegador B: `user=bruno`, `room=general`, `token=token-demo-123`
+- Navegador C: `user=carla`, `room=deportes`, `token=token-demo-123`
+
+3. Verifica envío a **uno** (`sendToOne`):
+
+- Al conectar cada navegador, solo ese cliente debe ver su `private_message` de bienvenida.
+
+4. Verifica envío a **sala** (`broadcastRoom`):
+
+- Cuando A o B se conectan, ambos ven `room_announcement` en `general`.
+- C no debe ver anuncios de `general` porque está en `deportes`.
+- Si A envía `chat_message`, lo ven A y B; C no.
+
+5. Verifica envío a **todos** (`broadcastAll`):
+
+- Cada conexión/desconexión dispara `global_announcement` con conexiones activas.
+- Ese evento debe verse en A, B y C.
+
+6. Verifica envío por usuario (`sendToUser`):
+
+- Desde A, usa `send_private` con `to=bruno` y texto cualquiera.
+- Solo B debe recibir `private_message` desde `ana`.
