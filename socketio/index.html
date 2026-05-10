@@ -1,0 +1,360 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Socket.IO - Paso 8</title>
+    <style>
+      /* Estilos base para demo con auth + reconexion. */
+      body {
+        font-family: sans-serif;
+        margin: 2rem;
+        max-width: 1100px;
+      }
+
+      .fila {
+        display: grid;
+        grid-template-columns: 220px 1fr auto;
+        gap: 0.5rem;
+        margin-bottom: 0.75rem;
+      }
+
+      input,
+      select,
+      button {
+        padding: 0.6rem;
+        font-size: 1rem;
+      }
+
+      #estado {
+        margin-bottom: 1rem;
+        font-weight: 700;
+      }
+
+      #connInfo {
+        margin-bottom: 1rem;
+        color: #444;
+      }
+
+      .paneles {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 1rem;
+      }
+
+      .panel {
+        border: 1px solid #ddd;
+        border-radius: 8px;
+        padding: 0.75rem;
+      }
+
+      ul {
+        list-style: none;
+        padding: 0;
+        margin: 0;
+        min-height: 220px;
+      }
+
+      li {
+        padding: 0.6rem;
+        border-bottom: 1px solid #eee;
+      }
+
+      li:last-child {
+        border-bottom: none;
+      }
+
+      .system {
+        color: #555;
+        font-style: italic;
+      }
+
+      .private {
+        background: #f7fbff;
+      }
+
+      #error {
+        color: #b00020;
+        margin-top: 0.75rem;
+        min-height: 1.2rem;
+      }
+
+      @media (max-width: 900px) {
+        .paneles {
+          grid-template-columns: 1fr;
+        }
+
+        .fila {
+          grid-template-columns: 1fr;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Paso 8 - Buenas practicas</h1>
+
+    <!-- Estado principal de conexion/sala. -->
+    <div id="estado">Conectando...</div>
+
+    <!-- Estado de reconexion y errores de handshake. -->
+    <div id="connInfo">Estado de red: iniciando...</div>
+
+    <!-- Form para token de autenticacion del handshake. -->
+    <form id="tokenForm" class="fila">
+      <input id="token" type="text" value="token-demo-123" placeholder="Token de acceso" />
+      <div></div>
+      <button type="submit">Reconectar con token</button>
+    </form>
+
+    <!-- Form para registrar nombre visible. -->
+    <form id="userForm" class="fila">
+      <input id="username" type="text" value="ClienteDemo" placeholder="Tu nombre" />
+      <div></div>
+      <button type="submit">Guardar nombre</button>
+    </form>
+
+    <!-- Form para cambio de room. -->
+    <form id="roomForm" class="fila">
+      <input id="room" type="text" value="general" placeholder="Room" />
+      <div></div>
+      <button type="submit">Cambiar sala</button>
+    </form>
+
+    <!-- Form para mensaje publico. -->
+    <form id="chatForm" class="fila">
+      <input id="textoRoom" type="text" placeholder="Mensaje publico de sala" />
+      <div></div>
+      <button type="submit">Enviar a sala</button>
+    </form>
+
+    <!-- Form para mensaje privado. -->
+    <form id="privateForm" class="fila">
+      <select id="targetUser">
+        <option value="">Selecciona destinatario</option>
+      </select>
+      <input id="textoPrivado" type="text" placeholder="Mensaje privado" />
+      <button type="submit">Enviar privado</button>
+    </form>
+
+    <div class="paneles">
+      <section class="panel">
+        <h2>Mensajes de sala</h2>
+        <ul id="mensajesSala"></ul>
+      </section>
+
+      <section class="panel">
+        <h2>Mensajes privados</h2>
+        <ul id="mensajesPrivados"></ul>
+      </section>
+    </div>
+
+    <!-- Errores funcionales del servidor. -->
+    <div id="error"></div>
+
+    <!-- Cliente Socket.IO servido automaticamente por el servidor. -->
+    <script src="/socket.io/socket.io.js"></script>
+    <script>
+      // Referencias DOM basicas.
+      const estado = document.getElementById("estado");
+      const connInfo = document.getElementById("connInfo");
+      const errorBox = document.getElementById("error");
+
+      const tokenForm = document.getElementById("tokenForm");
+      const tokenInput = document.getElementById("token");
+
+      const userForm = document.getElementById("userForm");
+      const usernameInput = document.getElementById("username");
+
+      const roomForm = document.getElementById("roomForm");
+      const roomInput = document.getElementById("room");
+
+      const chatForm = document.getElementById("chatForm");
+      const textoRoomInput = document.getElementById("textoRoom");
+
+      const privateForm = document.getElementById("privateForm");
+      const targetUserSelect = document.getElementById("targetUser");
+      const textoPrivadoInput = document.getElementById("textoPrivado");
+
+      const mensajesSala = document.getElementById("mensajesSala");
+      const mensajesPrivados = document.getElementById("mensajesPrivados");
+
+      // Estado local minimo.
+      let currentRoom = "general";
+      let currentToken = tokenInput.value.trim();
+
+      // Crea socket con token via auth en handshake.
+      // Importante: autoConnect=false para controlar cuando conectar.
+      const socket = io({
+        autoConnect: false,
+        auth: {
+          token: currentToken,
+        },
+        reconnection: true,
+        reconnectionAttempts: 10,
+        reconnectionDelay: 800,
+      });
+
+      // Utilidad para mostrar mensaje de sala.
+      function addRoomMessage(texto, isSystem = false) {
+        const li = document.createElement("li");
+        if (isSystem) {
+          li.classList.add("system");
+        }
+        li.textContent = texto;
+        mensajesSala.appendChild(li);
+      }
+
+      // Utilidad para mostrar mensaje privado.
+      function addPrivateMessage(texto) {
+        const li = document.createElement("li");
+        li.classList.add("private");
+        li.textContent = texto;
+        mensajesPrivados.appendChild(li);
+      }
+
+      // Refresca selector de destinatarios con usuarios online.
+      function updateTargetUsers(users) {
+        targetUserSelect.innerHTML = '<option value="">Selecciona destinatario</option>';
+
+        users.forEach((user) => {
+          if (user.socketId === socket.id) {
+            return;
+          }
+
+          const option = document.createElement("option");
+          option.value = user.socketId;
+          option.textContent = `${user.username} (${user.room})`;
+          targetUserSelect.appendChild(option);
+        });
+      }
+
+      // Conecta manualmente el socket al iniciar.
+      socket.connect();
+
+      // Conexion exitosa.
+      socket.on("connect", () => {
+        estado.textContent = `Conectado: ${socket.id} | Sala: ${currentRoom}`;
+        connInfo.textContent = "Estado de red: conectado";
+
+        // Registra nombre apenas conecta correctamente.
+        socket.emit("register_user", {
+          username: usernameInput.value,
+        });
+      });
+
+      // Captura errores de autenticacion/handshake.
+      socket.on("connect_error", (err) => {
+        connInfo.textContent = `Error de conexion: ${err.message}`;
+      });
+
+      // Evento cuando intenta reconectar.
+      socket.io.on("reconnect_attempt", (attempt) => {
+        connInfo.textContent = `Reintentando conexion... intento ${attempt}`;
+      });
+
+      // Evento al reconectar exitosamente.
+      socket.io.on("reconnect", (attempt) => {
+        connInfo.textContent = `Reconectado correctamente en intento ${attempt}`;
+      });
+
+      // Room confirmada por servidor.
+      socket.on("room_joined", (data) => {
+        currentRoom = data.room;
+        estado.textContent = `Conectado: ${socket.id} | Sala: ${currentRoom}`;
+        addRoomMessage(data.mensaje, true);
+      });
+
+      // Mensajes de sistema.
+      socket.on("system_message", (data) => {
+        const hora = new Date(data.fecha).toLocaleTimeString();
+        addRoomMessage(`[${hora}] ${data.mensaje}`, true);
+      });
+
+      // Mensajes publicos.
+      socket.on("chat_message", (data) => {
+        const hora = new Date(data.fecha).toLocaleTimeString();
+        addRoomMessage(`[${hora}] (${data.room}) ${data.fromUsername}: ${data.texto}`);
+      });
+
+      // Mensajes privados.
+      socket.on("private_message", (data) => {
+        const hora = new Date(data.fecha).toLocaleTimeString();
+        addPrivateMessage(`[${hora}] ${data.fromUsername} -> ${data.toUsername}: ${data.texto}`);
+      });
+
+      // Actualizacion de usuarios online.
+      socket.on("users_update", (data) => {
+        updateTargetUsers(data.users);
+      });
+
+      // Errores funcionales del servidor.
+      socket.on("error_message", (data) => {
+        errorBox.textContent = data.mensaje;
+      });
+
+      // Reconecta manualmente con un token nuevo.
+      tokenForm.addEventListener("submit", (event) => {
+        event.preventDefault();
+        errorBox.textContent = "";
+
+        currentToken = tokenInput.value.trim();
+
+        // Actualiza token en auth para siguiente handshake.
+        socket.auth = { token: currentToken };
+
+        // Fuerza nueva conexion con credencial actualizada.
+        if (socket.connected) {
+          socket.disconnect();
+        }
+        socket.connect();
+      });
+
+      // Guarda nombre de usuario.
+      userForm.addEventListener("submit", (event) => {
+        event.preventDefault();
+        errorBox.textContent = "";
+
+        socket.emit("register_user", {
+          username: usernameInput.value,
+        });
+      });
+
+      // Cambio de room.
+      roomForm.addEventListener("submit", (event) => {
+        event.preventDefault();
+        errorBox.textContent = "";
+
+        socket.emit("join_room", {
+          room: roomInput.value,
+        });
+      });
+
+      // Mensaje publico.
+      chatForm.addEventListener("submit", (event) => {
+        event.preventDefault();
+        errorBox.textContent = "";
+
+        socket.emit("chat_message", {
+          texto: textoRoomInput.value,
+        });
+
+        textoRoomInput.value = "";
+        textoRoomInput.focus();
+      });
+
+      // Mensaje privado.
+      privateForm.addEventListener("submit", (event) => {
+        event.preventDefault();
+        errorBox.textContent = "";
+
+        socket.emit("private_message", {
+          toSocketId: targetUserSelect.value,
+          texto: textoPrivadoInput.value,
+        });
+
+        textoPrivadoInput.value = "";
+        textoPrivadoInput.focus();
+      });
+    </script>
+  </body>
+</html>
