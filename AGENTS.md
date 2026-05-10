@@ -1,24 +1,28 @@
 # Agent Notes
 
-## Repo shape
-- This repo is currently a single Node project under `websocket/` (root `README` has no runnable instructions).
-- Main runnable app files are `websocket/server.js` and `websocket/index.html`.
-- Learning docs are in `websocket/pasos-websocket/` with index at `websocket/pasos-websocket/README.md`.
+## Repo layout (important)
+- This repo has **two separate Node apps**: `websocket/` (raw `ws`) and `socketio/` (Socket.IO).
+- Both default to port `3000`; run only one at a time unless you change ports.
+- Root `README` has no runnable instructions; rely on per-folder files/scripts.
 
-## Runtime and commands (verified)
-- Install deps: `npm install` (run inside `websocket/`).
-- Run app: `node server.js` (inside `websocket/`).
-- Open client: `http://localhost:3000`.
-- `npm test` is a placeholder that exits with error (`"Error: no test specified"`); do not treat it as a real test suite.
+## `websocket/` app (raw `ws`)
+- Install/run from `websocket/`: `npm install` then `node server.js`.
+- No real tests: `npm test` is a placeholder that always fails by design.
+- Entrypoint in practice is `websocket/server.js` (even though `package.json` `main` is `index.js`).
+- Static hosting is `express.static(__dirname)`: keep `websocket/index.html` in that folder unless you update static config.
+- Handshake contract: query param `token` required, optional `user` and `room`.
+- Demo tokens: `token-demo-123`, `token-demo-abc`.
+- Message contract: JSON with `type` + `payload`; incoming types implemented are `chat_message` and `join_room`.
+- Preserve existing safeguards in `websocket/server.js` (payload limit, auth check, room routing, heartbeat cleanup).
 
-## WebSocket contract used by current app
-- Server expects handshake query params: `token`, optional `user`, optional `room`.
-- Demo valid tokens in `websocket/server.js`: `token-demo-123`, `token-demo-abc`.
-- Message format is JSON with `type` + `payload`.
-- Implemented incoming message types: `chat_message`, `join_room`.
-- Implemented outgoing types include: `system_message`, `presence`, `chat_message`, `error`.
+## `socketio/` app
+- Install/run from `socketio/`: `npm install`, then `npm start` (`server.js`).
+- Dev script: `npm run dev` (nodemon).
+- External bridge server is separate: `npm run start:ext` (`server_ext.js`, listens on `4100`).
+- `server.js` enforces handshake auth via `socket.handshake.auth.token`; demo tokens are `token-demo-123`, `token-demo-abc`.
+- External publish endpoint is `POST /publish` on `server_ext.js` with header `x-api-key`.
+- Learning docs index: `socketio/GUIA_SOCKETIO_NODE_EXPRESS.md`.
 
-## Gotchas that are easy to miss
-- Static hosting is `express.static(__dirname)`: `index.html` must stay in `websocket/` unless server static path changes.
-- `websocket/server.js` already includes payload limits, auth check, room routing, and heartbeat cleanup; preserve these behaviors when editing.
-- `websocket/package.json` `main` is `index.js`, but actual entrypoint in use is `server.js`.
+## Cross-project gotchas
+- `websocket/` and `socketio/` are independent implementations; do not mix protocol assumptions (`ws` message schema vs Socket.IO events).
+- There is no CI/workflow config in this repo; verify changes by running the relevant server(s) and manual browser checks.
